@@ -1715,6 +1715,7 @@ class TwitterSearchScraper(_TwitterAPIScraper):
 			mode = TwitterSearchScraperMode.TOP if top else TwitterSearchScraperMode.LIVE
 		self._mode = mode
 
+
 	def get_items(self):
 		if not self._query.strip():
 			raise ValueError('empty query')
@@ -1845,6 +1846,76 @@ class TwitterUserScraper(TwitterSearchScraper):
 class TwitterProfileScraper(TwitterUserScraper):
 	name = 'twitter-profile'
 
+	def get_items2(self):
+		if not self._isUserId:
+			if self.entity is None:
+				raise snscrape.base.ScraperException(f'Could not resolve username {self._user!r} to ID')
+			userId = self.entity.id
+		else:
+			userId = self._user
+
+		paginationVariables = {
+			'userId': userId,
+			'count': 100,
+			'cursor': None,
+			'includePromotedContent': True,
+			'withQuickPromoteEligibilityTweetFields': True,
+			'withVoice': True,
+			'withV2Timeline': True,
+		}
+		variables = paginationVariables.copy()
+		del variables['cursor']
+		features = {
+			'rweb_lists_timeline_redesign_enabled': False,
+			'responsive_web_graphql_exclude_directive_enabled': True,
+			'verified_phone_label_enabled': False,
+			'creator_subscriptions_tweet_preview_api_enabled': False,
+			'responsive_web_graphql_timeline_navigation_enabled': True,
+			'responsive_web_graphql_skip_user_profile_image_extensions_enabled': False,
+			'tweetypie_unmention_optimization_enabled': True,
+			'responsive_web_edit_tweet_api_enabled': True,
+			'graphql_is_translatable_rweb_tweet_is_translatable_enabled': True,
+			'view_counts_everywhere_api_enabled': True,
+			'longform_notetweets_consumption_enabled': True,
+			'responsive_web_twitter_article_tweet_consumption_enabled': False,
+			'tweet_awards_web_tipping_enabled': False,
+			'freedom_of_speech_not_reach_fetch_enabled': True,
+			'standardized_nudges_misinfo': True,
+			'tweet_with_visibility_results_prefer_gql_limited_actions_policy_enabled': False,
+			'longform_notetweets_rich_text_read_enabled': True,
+			'longform_notetweets_inline_media_enabled': False,
+			'responsive_web_enhance_cards_enabled': False
+		}
+		field_toggles = {"withArticleRichContentState": False}
+		params = {'variables': variables, 'features': features}
+		paginationParams = {'variables': paginationVariables, 'features': features, 'fieldToggles': field_toggles}
+
+		gotPinned = False
+		previousPagesTweetIds = set()
+		for obj in self._iter_api_data('https://twitter.com/i/api/graphql/sPOiMsDrOtmxC00E01DkTA/UserTweets', _TwitterAPIType.GRAPHQL, params, paginationParams, instructionsPath = ['data', 'user', 'result', 'timeline_v2', 'timeline', 'instructions']):
+			if not obj['data'] or 'result' not in obj['data']['user']:
+				raise snscrape.base.ScraperException('Empty response')
+			if obj['data']['user']['result']['__typename'] == 'UserUnavailable':
+				raise snscrape.base.EntityUnavailable('User unavailable')
+			instructions = obj['data']['user']['result']['timeline_v2']['timeline']['instructions']
+			if not gotPinned:
+				for instruction in instructions:
+					if instruction['type'] == 'TimelinePinEntry':
+						gotPinned = True
+						tweetId = int(instruction['entry']['entryId'][6:]) if instruction['entry']['entryId'].startswith('tweet-') else None
+						yield self._graphql_timeline_tweet_item_result_to_tweet(instruction['entry']['content']['itemContent']['tweet_results']['result'], tweetId = tweetId, pinned = True)
+			tweets = list(self._graphql_timeline_instructions_to_tweets(instructions, pinned = False))
+			pageTweetIds = frozenset(tweet.id for tweet in tweets)
+			if len(pageTweetIds) > 0 and pageTweetIds in previousPagesTweetIds:
+				_logger.warning("Found duplicate page of tweets, stopping as assumed cycle found in Twitter's pagination")
+				break
+			previousPagesTweetIds.add(pageTweetIds)
+			# Includes tweets by other users on conversations, don't return those
+			for tweet in tweets:
+				if getattr(getattr(tweet, 'user', None), 'id', userId) != userId:
+					continue
+				yield tweet
+				
 	def get_items(self):
 		if not self._isUserId:
 			if self.entity is None:
